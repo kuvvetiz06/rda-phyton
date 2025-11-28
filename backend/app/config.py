@@ -1,14 +1,17 @@
+"""Application configuration for lease processing services."""
+
 from pydantic import BaseSettings
 
 
 class Settings(BaseSettings):
-    """Application configuration loaded from environment variables."""
+    """Lease extraction configuration loaded from environment variables."""
 
-    ollama_base_url: str = "http://localhost:11434"
-    llm_model_name: str = "llama3:8b"
+    default_currency: str = "USD"
+    payment_frequency: str = "monthly"
+    language: str = "en"
 
     class Config:
-        env_prefix = ""
+        env_prefix = "LEASE_"
         case_sensitive = False
 
 
