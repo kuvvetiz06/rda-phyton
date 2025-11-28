@@ -6,3 +6,8 @@ pdf2image
 pillow
 requests
 python-multipart
+pydantic
+pydantic-settings
+pypdf
+openai
+pytest
