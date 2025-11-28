@@ -1,54 +1,93 @@
-"""Logic for extracting lease data from documents."""
+"""PDF'ten kira sözleşmesi alan çıkarımı için servis fonksiyonları."""
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import json
 from typing import Iterable
 
-from app.pdf_reader import PDFReader
-from app.lease_models import LeaseDocument, LeaseParty, LeaseTerm
-from app.lease_schema import LeaseDocumentSchema, LeasePartySchema, LeaseTermSchema
+from openai import OpenAI
+from pydantic import ValidationError
+
+from app.config import settings
+from app.lease_models import LeaseExtractionResult
+from app.lease_schema import lease_json_schema
+from app.pdf_reader import PdfReadError, read_pdf_text
+
+SYSTEM_PROMPT = (
+    "Aşağıdaki PDF metninden kira/mağaza sözleşmesi alanlarını çıkar. "
+    "Türkçe çalış ve belirsiz kaldığında normalized alanlarını null bırak, "
+    "confidence değerini düşük ver."
+)
 
 
-class LeaseExtractor:
-    """Extract structured lease information from PDF content."""
+class LeaseExtractionError(RuntimeError):
+    """LLM veya doğrulama hatalarında fırlatılır."""
 
-    def __init__(self, reader: PDFReader | None = None) -> None:
-        self.reader = reader or PDFReader()
 
-    def extract(self, content: bytes) -> LeaseDocumentSchema:
-        """Parse raw PDF bytes and return structured lease data."""
+def build_user_prompt(text: str) -> str:
+    """LLM'e gönderilecek kullanıcı mesajını hazırlar."""
 
-        raw_text = self.reader.read_text(content)
-        lease_document = self._build_document(raw_text)
-        return self._serialize(lease_document)
+    instructions: Iterable[str] = (
+        "Metni dikkatlice incele ve istenen alanları doldur.",
+        "Belirsiz sayısal değerleri normalize edemiyorsan normalized alanını null bırak.",
+        "Tüm çıktı Türkçe olmalı.",
+        "Ham alıntılarda ilgili cümleleri kullan.",
+    )
+    prefix = "\n".join(f"- {item}" for item in instructions)
+    return f"Talimatlar:\n{prefix}\n\nPDF Metni:\n{text.strip()}"
 
-    def _build_document(self, raw_text: str) -> LeaseDocument:
-        """Create a LeaseDocument from raw text using placeholder heuristics."""
 
-        parties = self._extract_parties(raw_text)
-        terms = self._extract_terms(raw_text)
-        return LeaseDocument(parties=parties, terms=terms, raw_text=raw_text)
+def _parse_llm_response(payload: str) -> LeaseExtractionResult:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:  # pragma: no cover - savunma
+        raise LeaseExtractionError("LLM yanıtı JSON formatında değil") from exc
 
-    def _extract_parties(self, raw_text: str) -> list[LeaseParty]:
-        """Derive lease parties from the text."""
+    try:
+        return LeaseExtractionResult.model_validate(data)
+    except ValidationError as exc:
+        raise LeaseExtractionError("LLM yanıtı beklenen şema ile uyuşmuyor") from exc
 
-        if not raw_text:
-            return []
 
-        placeholder_roles: Iterable[str] = ("landlord", "tenant")
-        return [LeaseParty(name=role.title(), role=role) for role in placeholder_roles]
+def extract_lease_from_pdf(pdf_path: str, client: OpenAI | None = None) -> LeaseExtractionResult:
+    """PDF yolundan kira alanlarını çıkarır."""
 
-    def _extract_terms(self, raw_text: str) -> LeaseTerm:
-        """Derive lease terms from the text."""
+    try:
+        text = read_pdf_text(pdf_path)
+    except PdfReadError as exc:
+        raise LeaseExtractionError(str(exc)) from exc
 
-        if not raw_text:
-            return LeaseTerm()
+    if not text:
+        raise LeaseExtractionError("PDF metni boş")
 
-        return LeaseTerm(rent_amount=0.0, currency="USD", payment_frequency="monthly")
+    api_client = client or OpenAI(api_key=settings.openai_api_key)
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": build_user_prompt(text)},
+    ]
 
-    @staticmethod
-    def _serialize(document: LeaseDocument) -> LeaseDocumentSchema:
-        party_schemas = [LeasePartySchema(**asdict(party)) for party in document.parties]
-        term_schema = LeaseTermSchema(**asdict(document.terms))
-        return LeaseDocumentSchema(parties=party_schemas, terms=term_schema, raw_text=document.raw_text)
+    try:
+        response = api_client.chat.completions.create(
+            model=settings.openai_model,
+            temperature=settings.openai_temperature,
+            messages=messages,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "lease_extraction",
+                    "schema": lease_json_schema,
+                    "strict": True,
+                },
+            },
+        )
+    except Exception as exc:  # pragma: no cover - OpenAI hata türü ortama bağlı
+        raise LeaseExtractionError("LLM isteği başarısız oldu") from exc
+
+    choice = response.choices[0].message
+    if not choice.content:
+        raise LeaseExtractionError("LLM boş yanıt döndürdü")
+
+    return _parse_llm_response(choice.content)
+
+
+__all__ = ["extract_lease_from_pdf", "LeaseExtractionError"]

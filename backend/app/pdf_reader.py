@@ -1,30 +1,57 @@
-"""PDF reading utilities."""
+"""PDF okuma yardımcıları."""
 
 from __future__ import annotations
 
-from typing import Callable
+from pathlib import Path
+
+from pypdf import PdfReader
 
 
-class PDFReader:
-    """Simple PDF reader abstraction.
+class PdfReadError(RuntimeError):
+    """PDF metni okunamadığında fırlatılır."""
 
-    The reader uses a configurable parser callable to convert raw PDF bytes
-    into text. The default parser performs a best-effort UTF-8 decode so the
-    class can be used in tests without requiring external dependencies.
+
+def read_pdf_text(pdf_path: str) -> str:
+    """PDF dosyasından basit metin çıkarır.
+
+    Parameters
+    ----------
+    pdf_path: str
+        Okunacak PDF dosyasının yolu.
+
+    Returns
+    -------
+    str
+        PDF sayfalarından birleştirilmiş metin.
+
+    Raises
+    ------
+    PdfReadError
+        Dosya erişimi, bozuk PDF veya metin çıkarma hatalarında.
     """
 
-    def __init__(self, parser: Callable[[bytes], str] | None = None) -> None:
-        self._parser = parser or self._default_parser
+    path = Path(pdf_path)
+    if not path.exists():
+        raise PdfReadError(f"PDF bulunamadı: {pdf_path}")
 
-    def read_text(self, content: bytes) -> str:
-        """Return plain text extracted from the given PDF bytes."""
+    try:
+        reader = PdfReader(str(path))
+    except Exception as exc:  # pragma: no cover - pypdf özel hatası bağlama bağlı
+        raise PdfReadError(f"PDF açılamadı: {pdf_path}") from exc
 
-        text = self._parser(content)
-        return text.strip()
+    texts: list[str] = []
+    try:
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            texts.append(page_text.strip())
+    except Exception as exc:  # pragma: no cover - pypdf özel hatası bağlama bağlı
+        raise PdfReadError("PDF metni çıkarılırken hata oluştu") from exc
 
-    @staticmethod
-    def _default_parser(content: bytes) -> str:
-        try:
-            return content.decode("utf-8")
-        except UnicodeDecodeError:
-            return ""
+    combined = "\n".join(filter(None, texts)).strip()
+    if not combined:
+        raise PdfReadError("PDF'den metin çıkarılamadı")
+
+    return combined
+
+
+__all__ = ["read_pdf_text", "PdfReadError"]
